@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -36,6 +38,8 @@ var (
 
 	_state   *service.State
 	_gateway *http.Server
+	_policy  *service.RoutePolicy
+	_origins []string
 
 	_managementServiceReady = make(chan struct{})
 	_gatewayServiceReady    = make(chan struct{})
@@ -107,6 +111,11 @@ func init() {
 		panic(err)
 	}
 
+	if err := initRoutePolicy(config); err != nil {
+		logger.Error("Failed to load gateway route policy", zap.Any("error", err))
+		panic(err)
+	}
+
 	if err := checkPrequisites(_state); err != nil {
 		logger.Error("Failed to check prequisites", zap.Any("error", err))
 		panic(err)
@@ -116,6 +125,58 @@ func init() {
 		config.Set(common.ConfigKeyGatewayPort, port)
 		return config.WriteConfig()
 	})
+}
+
+// initRoutePolicy builds the deny-by-default route policy from operator
+// configuration. Invalid proxy CIDRs, target CIDRs, lease TTLs, or origins
+// fail startup instead of running with an unintended trust boundary.
+func initRoutePolicy(config interface {
+	GetString(string) string
+}) error {
+	leaseTTL, err := service.ParseRouteLeaseTTL(config.GetString(common.ConfigKeyRouteLeaseTTL))
+	if err != nil {
+		return err
+	}
+	policy, err := service.NewRoutePolicy(
+		config.GetString(common.ConfigKeyTrustedProxyCIDRs),
+		config.GetString(common.ConfigKeyRouteTargetCIDRs),
+		leaseTTL,
+	)
+	if err != nil {
+		return err
+	}
+	origins, err := parseCORSOrigins(config.GetString(common.ConfigKeyCORSOrigins))
+	if err != nil {
+		return err
+	}
+	_policy = policy
+	_origins = origins
+	return nil
+}
+
+func parseCORSOrigins(raw string) ([]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	origins := []string{}
+	for _, part := range strings.Split(trimmed, ",") {
+		origin := strings.TrimSpace(part)
+		if origin == "" {
+			return nil, errors.New("empty CORS origin")
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed == nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+			parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+			(parsed.Path != "" && parsed.Path != "/") {
+			return nil, errors.New("CORS origin must be an exact http(s) origin")
+		}
+		if origin == "*" {
+			return nil, errors.New("wildcard CORS origin is forbidden with credentials")
+		}
+		origins = append(origins, parsed.Scheme+"://"+parsed.Host)
+	}
+	return origins, nil
 }
 
 func main() {
@@ -162,8 +223,13 @@ func main() {
 
 	app := fx.New(
 		fx.Provide(func() *service.State { return _state }),
-		fx.Provide(service.NewManagementService),
-		fx.Provide(route.NewManagementRoute),
+		fx.Provide(func() *service.RoutePolicy { return _policy }),
+		fx.Provide(func(state *service.State, policy *service.RoutePolicy) *service.Management {
+			return service.NewManagementServiceWithPolicy(state, policy)
+		}),
+		fx.Provide(func(management *service.Management) *route.ManagementRoute {
+			return route.NewManagementRouteWithCORS(management, _origins)
+		}),
 		fx.Provide(route.NewGatewayRoute),
 		fx.Provide(route.NewStaticRoute),
 		fx.Invoke(run),
@@ -217,7 +283,7 @@ func run(
 				if err := management.CreateRoute(&model.Route{
 					Path:   "/v1/gateway/port",
 					Target: "http://" + listener.Addr().String(),
-				}); err != nil {
+				}, service.SelfRouteOwner); err != nil {
 					return err
 				}
 
@@ -304,9 +370,10 @@ func run(
 			if err := management.CreateRoute(&model.Route{
 				Path:   "/",
 				Target: target,
-			}); err != nil {
+			}, service.SelfRouteOwner); err != nil {
 				return err
 			}
+			keepSelfRoutesAlive(ctx, management)
 
 			logger.Info(
 				"Static web service is listening...",
@@ -316,6 +383,34 @@ func run(
 			return staticServer.Serve(listener)
 		},
 	})
+}
+
+// keepSelfRoutesAlive renews the gateway's own registrations at half the
+// lease TTL. Without renewal the gateway would expire its own routes and
+// stop proxying to itself; with it, a crashed gateway's stale self-routes
+// still die on their own.
+func keepSelfRoutesAlive(ctx context.Context, management *service.Management) {
+	interval := management.Policy().LeaseTTL() / 2
+	if interval < time.Minute {
+		interval = time.Minute
+	}
+	if interval > time.Hour {
+		interval = time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, route := range management.GetRoutes() {
+					_ = management.RenewRoute(route.Path, service.SelfRouteOwner)
+				}
+			}
+		}
+	}()
 }
 
 func reloadGateway(port string, route *http.ServeMux) error {
@@ -375,17 +470,13 @@ func reloadGateway(port string, route *http.ServeMux) error {
 }
 
 func checkURLWithRetry(url string, retry uint) error {
-	count := retry
 	var err error
-
-	for count >= 0 {
-		logger.Info("Checking if service at URL is running...", zap.Any("url", url), zap.Any("retry", count))
-		if err = checkURL(url); err != nil {
-			time.Sleep(time.Second)
-			count--
-			continue
+	for attempt := uint(0); attempt <= retry; attempt++ {
+		logger.Info("Checking if service at URL is running...", zap.Any("url", url), zap.Any("attempt", attempt))
+		if err = checkURL(url); err == nil {
+			return nil
 		}
-		break
+		time.Sleep(time.Second)
 	}
 
 	return err
@@ -393,12 +484,15 @@ func checkURLWithRetry(url string, retry uint) error {
 
 func checkURL(url string) error {
 	response, err := http2.Get(url, 5*time.Second)
-	if err == nil {
+	if err != nil {
 		return err
+	}
+	if response == nil || response.Body == nil {
+		return ErrCheckURLNotOK
 	}
 	defer response.Body.Close()
 
-	if response.StatusCode == http.StatusOK {
+	if response.StatusCode != http.StatusOK {
 		return ErrCheckURLNotOK
 	}
 
