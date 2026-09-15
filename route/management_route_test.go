@@ -1,7 +1,6 @@
 package route
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -33,6 +32,7 @@ func setup(t *testing.T) func(t *testing.T) {
 	if err := _state.SetRuntimePath(tmpdir); err != nil {
 		t.Fatal(err)
 	}
+	plantAddressFile(t, tmpdir)
 
 	management := service.NewManagementService(_state)
 	managementRoute := NewManagementRoute(management)
@@ -61,22 +61,21 @@ func TestCreateRoute(t *testing.T) {
 	defer setup(t)(t)
 
 	route := &model.Route{
-		Path:   "test",
+		Path:   "/test",
 		Target: "http://localhost:8080",
 	}
 
 	body, err := json.Marshal(route)
 	assert.NilError(t, err)
 
-	req, _ := http.NewRequest(http.MethodPost, "/v1/gateway/routes", bytes.NewReader(body))
+	req := bearerRequest(t, http.MethodPost, "/v1/gateway/routes", string(body), true)
 	req.RemoteAddr = "127.0.0.1:0"
-	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 
 	w := httptest.NewRecorder()
 	_router.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusCreated, w.Code)
 
-	req, _ = http.NewRequest(http.MethodGet, "/v1/gateway/routes", nil)
+	req = bearerRequest(t, http.MethodGet, "/v1/gateway/routes", "", true)
 	w = httptest.NewRecorder()
 	_router.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -90,6 +89,115 @@ func TestCreateRoute(t *testing.T) {
 	assert.Equal(t, 1, len(routes))
 	assert.Equal(t, route.Path, routes[0].Path)
 	assert.Equal(t, route.Target, routes[0].Target)
+}
+
+func TestManagementRequiresBearerToken(t *testing.T) {
+	defer setup(t)(t)
+
+	// Loopback without credentials must not rewire the gateway.
+	payload := `{"path":"/evil","target":"http://127.0.0.1:8080/"}`
+	req := bearerRequest(t, http.MethodPost, "/v1/gateway/routes", payload, false)
+	req.RemoteAddr = "127.0.0.1:0"
+	w := httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// Query-string tokens are never accepted, even when valid.
+	req = bearerRequest(t, http.MethodPost, "/v1/gateway/routes?token="+authToken, payload, false)
+	req.RemoteAddr = "127.0.0.1:0"
+	w = httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// Readers need credentials too: topology is not public.
+	req = bearerRequest(t, http.MethodGet, "/v1/gateway/routes", "", false)
+	req.RemoteAddr = "127.0.0.1:0"
+	w = httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// Port changes need credentials too.
+	req = bearerRequest(t, http.MethodPut, "/v1/gateway/port", `{"port":"123"}`, false)
+	req.RemoteAddr = "127.0.0.1:0"
+	w = httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestRouteDeleteAndRenewFlow(t *testing.T) {
+	defer setup(t)(t)
+
+	payload := `{"path":"/app","target":"http://127.0.0.1:8080/"}`
+	req := bearerRequest(t, http.MethodPost, "/v1/gateway/routes", payload, true)
+	w := httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusCreated, w.Code)
+
+	// Renew the live registration.
+	req = bearerRequest(t, http.MethodPost, "/v1/gateway/routes/renew", `{"path":"/app"}`, true)
+	w = httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	// Renewing an unknown path is 404, not a silent create.
+	req = bearerRequest(t, http.MethodPost, "/v1/gateway/routes/renew", `{"path":"/missing"}`, true)
+	w = httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	// Delete removes durably.
+	req = bearerRequest(t, http.MethodDelete, "/v1/gateway/routes", `{"path":"/app"}`, true)
+	w = httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	// Deleting again is 404: removal is not resurrected.
+	req = bearerRequest(t, http.MethodDelete, "/v1/gateway/routes", `{"path":"/app"}`, true)
+	w = httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	req = bearerRequest(t, http.MethodGet, "/v1/gateway/routes", "", true)
+	w = httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	var routes []*model.Route
+	assert.NilError(t, json.NewDecoder(w.Body).Decode(&routes))
+	assert.Equal(t, 0, len(routes))
+}
+
+func TestCORSSameOriginByDefault(t *testing.T) {
+	defer setup(t)(t)
+
+	req := bearerRequest(t, http.MethodGet, "/v1/gateway/routes", "", true)
+	req.Header.Set("Origin", "https://evil.example")
+	w := httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, "", w.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestCORSAllowlist(t *testing.T) {
+	tmpdir, _ := os.MkdirTemp("", "casaos-gateway-cors-test")
+	defer os.RemoveAll(tmpdir)
+
+	state := service.NewState()
+	assert.NilError(t, state.SetRuntimePath(tmpdir))
+	plantAddressFile(t, tmpdir)
+
+	management := service.NewManagementService(state)
+	handler := NewManagementRouteWithCORS(management, []string{"https://console.example"}).GetRoute()
+
+	req := bearerRequest(t, http.MethodGet, "/v1/gateway/routes", "", true)
+	req.Header.Set("Origin", "https://console.example")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, "https://console.example", w.Header().Get("Access-Control-Allow-Origin"))
+
+	req = bearerRequest(t, http.MethodGet, "/v1/gateway/routes", "", true)
+	req.Header.Set("Origin", "https://evil.example")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, "", w.Header().Get("Access-Control-Allow-Origin"))
 }
 
 func TestChangePort(t *testing.T) {
@@ -112,9 +220,8 @@ func TestChangePort(t *testing.T) {
 	body, err := json.Marshal(request)
 	assert.NilError(t, err)
 
-	req, _ := http.NewRequest(http.MethodPut, "/v1/gateway/port", bytes.NewReader(body))
+	req := bearerRequest(t, http.MethodPut, "/v1/gateway/port", string(body), true)
 	req.RemoteAddr = "127.0.0.1:0"
-	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 
 	w := httptest.NewRecorder()
 	_router.ServeHTTP(w, req)
@@ -123,7 +230,7 @@ func TestChangePort(t *testing.T) {
 	assert.Equal(t, expectedPort, actualPort)
 
 	// get
-	req, _ = http.NewRequest(http.MethodGet, "/v1/gateway/port", nil)
+	req = bearerRequest(t, http.MethodGet, "/v1/gateway/port", "", true)
 
 	w = httptest.NewRecorder()
 	_router.ServeHTTP(w, req)
@@ -151,9 +258,8 @@ func TestChangePortNegative(t *testing.T) {
 	body, err := json.Marshal(request)
 	assert.NilError(t, err)
 
-	req, _ := http.NewRequest(http.MethodPut, "/v1/gateway/port", bytes.NewReader(body))
+	req := bearerRequest(t, http.MethodPut, "/v1/gateway/port", string(body), true)
 	req.RemoteAddr = "127.0.0.1:0"
-	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 
 	w := httptest.NewRecorder()
 	_router.ServeHTTP(w, req)
@@ -162,7 +268,7 @@ func TestChangePortNegative(t *testing.T) {
 	assert.Equal(t, expectedPort, "123")
 
 	// get
-	req, _ = http.NewRequest(http.MethodGet, "/v1/gateway/port", nil)
+	req = bearerRequest(t, http.MethodGet, "/v1/gateway/port", "", true)
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 
 	w = httptest.NewRecorder()
@@ -188,9 +294,8 @@ func TestChangePortNegative(t *testing.T) {
 	body, err = json.Marshal(request)
 	assert.NilError(t, err)
 
-	req, _ = http.NewRequest(http.MethodPut, "/v1/gateway/port", bytes.NewReader(body))
+	req = bearerRequest(t, http.MethodPut, "/v1/gateway/port", string(body), true)
 	req.RemoteAddr = "127.0.0.1:0"
-	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 
 	w = httptest.NewRecorder()
 	_router.ServeHTTP(w, req)
@@ -199,7 +304,7 @@ func TestChangePortNegative(t *testing.T) {
 	assert.Equal(t, expectedPort, "123")
 
 	// get
-	req, _ = http.NewRequest(http.MethodGet, "/v1/gateway/port", nil)
+	req = bearerRequest(t, http.MethodGet, "/v1/gateway/port", "", true)
 
 	w = httptest.NewRecorder()
 	_router.ServeHTTP(w, req)

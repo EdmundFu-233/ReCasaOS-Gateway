@@ -3,3 +3,17 @@ runtimepath=/var/run/casaos
 
 [gateway]
 port=
+# Comma-separated CIDRs whose X-Forwarded-For and X-Real-IP headers the
+# gateway believes. Any other peer's forwarding headers are ignored and the
+# peer address is used as the client IP. Default: loopback only.
+trustedproxycidrs=127.0.0.1/32,::1/128
+# Comma-separated CIDRs a registered route target may live in. Loopback and
+# localhost are always allowed; other DNS names are rejected outright.
+# Default: loopback only.
+routetargetcidrs=127.0.0.1/32,::1/128
+# How long a registered route stays valid without renewal (for example 24h).
+# Range: 1m to 720h. Expired routes are dropped and never resurrected.
+routeleasettl=24h
+# Comma-separated exact origins allowed to use browser credentials against
+# the management API. Empty (the default) means same-origin only.
+corsorigins=

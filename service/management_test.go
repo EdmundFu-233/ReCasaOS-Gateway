@@ -41,7 +41,7 @@ func TestRoutesPersistence(t *testing.T) {
 		Target: "http://localhost:8080",
 	}
 
-	if err := management.CreateRoute(route); err != nil {
+	if err := management.CreateRoute(route, "tester"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,7 +81,7 @@ func TestPathSorting(t *testing.T) {
 		if err := management.CreateRoute(&model.Route{
 			Path:   path,
 			Target: target,
-		}); err != nil {
+		}, "tester"); err != nil {
 			t.Fatal(err)
 		}
 	}
