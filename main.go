@@ -348,6 +348,7 @@ func run(
 		})
 
 	// static web
+	renewCtx, stopRenew := context.WithCancel(context.Background())
 	lifecycle.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			listener, err := net.Listen("tcp", net.JoinHostPort(localhost, "0"))
@@ -373,7 +374,7 @@ func run(
 			}, service.SelfRouteOwner); err != nil {
 				return err
 			}
-			keepSelfRoutesAlive(ctx, management)
+			keepSelfRoutesAlive(renewCtx, management)
 
 			logger.Info(
 				"Static web service is listening...",
@@ -381,6 +382,10 @@ func run(
 				zap.Any("filepath", urlFilePath),
 			)
 			return staticServer.Serve(listener)
+		},
+		OnStop: func(context.Context) error {
+			stopRenew()
+			return nil
 		},
 	})
 }
@@ -406,7 +411,9 @@ func keepSelfRoutesAlive(ctx context.Context, management *service.Management) {
 				return
 			case <-ticker.C:
 				for _, route := range management.GetRoutes() {
-					_ = management.RenewRoute(route.Path, service.SelfRouteOwner)
+					if err := management.RenewRoute(route.Path, service.SelfRouteOwner); err != nil {
+						logger.Error("Failed to renew gateway self route", zap.String("path", route.Path), zap.Any("error", err))
+					}
 				}
 			}
 		}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/IceWhaleTech/CasaOS-Common/model"
@@ -26,6 +27,7 @@ type routesFile struct {
 // and restarts only resurrect live entries. A removed path never comes back
 // on its own.
 type Management struct {
+	mu      sync.Mutex
 	entries map[string]*RouteEntry
 	proxies map[string]*httputil.ReverseProxy
 	policy  *RoutePolicy
@@ -81,18 +83,22 @@ func (g *Management) CreateRoute(route *model.Route, owner string) error {
 	if err != nil {
 		return err
 	}
-	g.sweep()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sweepLocked()
 	if existing, taken := g.entries[entry.Path]; taken && existing.Owner != owner {
 		return ErrRouteOwned
 	}
 	g.adopt(entry)
-	return g.persist()
+	return g.persistLocked()
 }
 
 // RenewRoute extends one live registration. Only the owning identity may
 // renew; expired paths must be re-created.
 func (g *Management) RenewRoute(routePath, owner string) error {
-	g.sweep()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sweepLocked()
 	entry, ok := g.entries[routePath]
 	if !ok {
 		return ErrRouteNotFound
@@ -103,14 +109,16 @@ func (g *Management) RenewRoute(routePath, owner string) error {
 	now := g.policy.now().Unix()
 	entry.ExpiresAt = now + int64(g.policy.leaseTTL/time.Second)
 	entry.RenewedAt = now
-	return g.persist()
+	return g.persistLocked()
 }
 
 // DeleteRoute removes one registration durably. Only the owning identity
 // may remove; the removal is persisted immediately so restarts cannot
 // resurrect the path.
 func (g *Management) DeleteRoute(routePath, owner string) error {
-	g.sweep()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sweepLocked()
 	entry, ok := g.entries[routePath]
 	if !ok {
 		return ErrRouteNotFound
@@ -120,12 +128,14 @@ func (g *Management) DeleteRoute(routePath, owner string) error {
 	}
 	delete(g.entries, routePath)
 	delete(g.proxies, routePath)
-	return g.persist()
+	return g.persistLocked()
 }
 
 // GetRoutes lists live registrations as plain path/target pairs.
 func (g *Management) GetRoutes() []*model.Route {
-	g.sweep()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sweepLocked()
 	routes := make([]*model.Route, 0, len(g.entries))
 	for _, entry := range g.entries {
 		routes = append(routes, &model.Route{
@@ -139,7 +149,9 @@ func (g *Management) GetRoutes() []*model.Route {
 
 // GetProxy returns the longest live prefix match on a segment boundary.
 func (g *Management) GetProxy(path string) *httputil.ReverseProxy {
-	g.sweep()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sweepLocked()
 	paths := make([]string, 0, len(g.proxies))
 	for registered := range g.proxies {
 		paths = append(paths, registered)
@@ -158,7 +170,7 @@ func (g *Management) Policy() *RoutePolicy {
 	return g.policy
 }
 
-func (g *Management) sweep() {
+func (g *Management) sweepLocked() {
 	now := g.policy.now()
 	dropped := false
 	for registered, entry := range g.entries {
@@ -170,13 +182,13 @@ func (g *Management) sweep() {
 		}
 	}
 	if dropped {
-		if err := g.persist(); err != nil {
+		if err := g.persistLocked(); err != nil {
 			logger.Error("Failed to persist route sweep", zap.Any("error", err))
 		}
 	}
 }
 
-func (g *Management) persist() error {
+func (g *Management) persistLocked() error {
 	routesFilePath := filepath.Join(g.State.GetRuntimePath(), RoutesFile)
 	entries := make([]RouteEntry, 0, len(g.entries))
 	for _, entry := range g.entries {

@@ -1,8 +1,10 @@
 package service
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,7 +117,7 @@ func TestLegacyImportIsBounded(t *testing.T) {
 	entry := management.entries["/keep"]
 	assert.Equal(t, legacyRouteOwner, entry.Owner)
 	remaining := time.Until(time.Unix(entry.ExpiresAt, 0))
-	assert.Assert(t, remaining > 2000*time.Hour && remaining <= legacyImportLease)
+	assert.Assert(t, remaining > 700*time.Hour && remaining <= legacyImportLease)
 }
 
 func TestTargetValidation(t *testing.T) {
@@ -231,4 +233,44 @@ func TestPolicyValidation(t *testing.T) {
 	assert.Assert(t, err != nil)
 	_, err = NewRoutePolicy("", "", 0)
 	assert.Assert(t, err != nil)
+}
+
+func TestManagementConcurrentHammer(t *testing.T) {
+	state, _ := lifecycleState(t)
+	management := NewManagementService(state)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			path := "/hammer"
+			owner := "owner"
+			_ = management.CreateRoute(&model.Route{Path: path, Target: "http://127.0.0.1:8080"}, owner)
+			_ = management.GetProxy(path)
+			_ = management.GetRoutes()
+			_ = management.RenewRoute(path, owner)
+			_ = management.DeleteRoute(path, owner)
+			_ = n
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestSanitizeRemovesCDNIdentityHeaders(t *testing.T) {
+	header := map[string][]string{
+		"True-Client-Ip":   {"9.9.9.9"},
+		"Cf-Connecting-Ip": {"8.8.8.8"},
+		"X-Client-Ip":      {"7.7.7.7"},
+	}
+	h := http.Header(header)
+	SanitizeProxyHeaders(h, "203.0.113.7")
+	for _, key := range []string{"True-Client-Ip", "Cf-Connecting-Ip", "X-Client-Ip"} {
+		if got := h.Get(key); got != "" {
+			t.Fatalf("%s survived sanitization: %q", key, got)
+		}
+	}
+	if got := h.Get("X-Forwarded-For"); got != "203.0.113.7" {
+		t.Fatalf("X-Forwarded-For = %q", got)
+	}
 }

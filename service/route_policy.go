@@ -339,6 +339,9 @@ func rightmostUntrusted(chain []string, trusted []*net.IPNet) string {
 // request is proxied, then records the derived client IP as the single
 // X-Forwarded-For value. Backends therefore never see spoofed identity, and
 // the reverse proxy appends the direct peer on top of a known-good base.
+// Beyond the standard forwarding headers, common CDN/proxy client-IP
+// headers are removed as well: any backend trusting them would otherwise
+// accept spoofed identity straight from the client.
 func SanitizeProxyHeaders(header http.Header, clientIP string) {
 	header.Del("X-Forwarded-For")
 	header.Del("X-Forwarded-Host")
@@ -346,6 +349,12 @@ func SanitizeProxyHeaders(header http.Header, clientIP string) {
 	header.Del("X-Forwarded-Port")
 	header.Del("X-Real-Ip")
 	header.Del("X-Real-IP")
+	header.Del("X-Client-Ip")
+	header.Del("X-Client-IP")
+	header.Del("True-Client-Ip")
+	header.Del("True-Client-IP")
+	header.Del("Cf-Connecting-Ip")
+	header.Del("CF-Connecting-IP")
 	header.Del("Forwarded")
 	header.Del("Forwarded-For")
 	if clientIP != "" {
