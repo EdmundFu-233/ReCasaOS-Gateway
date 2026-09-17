@@ -480,3 +480,29 @@ func TestSpoofedOwnerHeaderDoesNotGrantServiceOwnership(t *testing.T) {
 	_router.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
+
+// Reserved namespaces cannot be claimed through the management API by a
+// non-owning identity, while the service credential keeps its tombstone.
+func TestReservedPathsRejectedForUserOwner(t *testing.T) {
+	defer setup(t)(t)
+
+	for _, path := range []string{"/", "/v1/gateway/port", "/public-files", "/public-files/sub"} {
+		payload := `{"path":"` + path + `","target":"http://127.0.0.1:8080/"}`
+		req := bearerRequest(t, http.MethodPost, "/v1/gateway/routes", payload, true)
+		req.RemoteAddr = "127.0.0.1:0"
+		w := httptest.NewRecorder()
+		_router.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("POST %s status = %d, want 403", path, w.Code)
+		}
+	}
+
+	payload := `{"path":"/public-files","target":"http://127.0.0.1:8080/"}`
+	req, err := http.NewRequest(http.MethodPost, "/v1/gateway/routes", strings.NewReader(payload))
+	assert.NilError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+_serviceToken)
+	w := httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusCreated, w.Code)
+}

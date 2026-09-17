@@ -30,8 +30,6 @@ import (
 	"go.uber.org/zap"
 )
 
-const localhost = "127.0.0.1"
-
 var (
 	commit = "private build"
 	date   = "private build"
@@ -40,6 +38,13 @@ var (
 	_gateway *http.Server
 	_policy  *service.RoutePolicy
 	_origins []string
+
+	// Validated listener binds. The management and static listeners stay on
+	// loopback; the gateway bind is operator-configured (empty means all
+	// interfaces for LAN serving).
+	_managementBind string
+	_staticBind     string
+	_gatewayBind    string
 
 	_managementServiceReady = make(chan struct{})
 	_gatewayServiceReady    = make(chan struct{})
@@ -116,6 +121,11 @@ func init() {
 		panic(err)
 	}
 
+	if err := initListenerBinds(config); err != nil {
+		logger.Error("Failed to load gateway listener binds", zap.Any("error", err))
+		panic(err)
+	}
+
 	if err := checkPrequisites(_state); err != nil {
 		logger.Error("Failed to check prequisites", zap.Any("error", err))
 		panic(err)
@@ -151,6 +161,22 @@ func initRoutePolicy(config interface {
 	}
 	_policy = policy
 	_origins = origins
+	return nil
+}
+
+// initListenerBinds validates the configured listener addresses before any
+// socket opens. The management and static listeners must stay on loopback;
+// the gateway bind may be empty (all interfaces) or a literal IP.
+func initListenerBinds(config interface {
+	GetString(string) string
+}) error {
+	managementBind, staticBind, gatewayBind, err := common.ParseListenerBinds(config)
+	if err != nil {
+		return err
+	}
+	_managementBind = managementBind
+	_staticBind = staticBind
+	_gatewayBind = gatewayBind
 	return nil
 }
 
@@ -266,7 +292,7 @@ func run(
 	lifecycle.Append(
 		fx.Hook{
 			OnStart: func(context.Context) error {
-				listener, err := net.Listen("tcp", net.JoinHostPort(localhost, "0"))
+				listener, err := net.Listen("tcp", net.JoinHostPort(_managementBind, "0"))
 				if err != nil {
 					return err
 				}
@@ -328,7 +354,7 @@ func run(
 					for _, p := range portsToCheck {
 						port = fmt.Sprintf("%d", p)
 						logger.Info("Checking if port is available...", zap.Any("port", port))
-						if listener, err := net.Listen("tcp", net.JoinHostPort("", port)); err == nil {
+						if listener, err := net.Listen("tcp", net.JoinHostPort(_gatewayBind, port)); err == nil {
 							if err = listener.Close(); err != nil {
 								logger.Error("Failed to close listener", zap.Any("error", err), zap.Any("port", port))
 								continue
@@ -364,7 +390,7 @@ func run(
 	renewCtx, stopRenew := context.WithCancel(context.Background())
 	lifecycle.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
-			listener, err := net.Listen("tcp", net.JoinHostPort(localhost, "0"))
+			listener, err := net.Listen("tcp", net.JoinHostPort(_staticBind, "0"))
 			if err != nil {
 				return err
 			}
@@ -437,7 +463,7 @@ func keepSelfRoutesAlive(ctx context.Context, management *service.Management) {
 }
 
 func reloadGateway(port string, route *http.ServeMux) error {
-	listener, err := net.Listen("tcp", net.JoinHostPort("", port))
+	listener, err := net.Listen("tcp", net.JoinHostPort(_gatewayBind, port))
 	if err != nil {
 		return err
 	}

@@ -17,3 +17,13 @@ routeleasettl=24h
 # Comma-separated exact origins allowed to use browser credentials against
 # the management API. Empty (the default) means same-origin only.
 corsorigins=
+# Literal IP the management listener binds. Must stay loopback so the
+# management API is never on a network interface. Default: 127.0.0.1.
+managementbindaddress=127.0.0.1
+# Literal IP the static dashboard listener binds. Must stay loopback.
+# Default: 127.0.0.1.
+staticbindaddress=127.0.0.1
+# Literal IP the gateway data listener binds. Empty (the default) means all
+# interfaces, which serves the dashboard on the LAN. Set a private address
+# to narrow it; hostnames are rejected.
+gatewaybindaddress=

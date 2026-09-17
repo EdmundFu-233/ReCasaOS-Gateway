@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -333,4 +334,36 @@ func TestSanitizeRemovesCDNIdentityHeaders(t *testing.T) {
 	if got := h.Get("X-Forwarded-For"); got != "203.0.113.7" {
 		t.Fatalf("X-Forwarded-For = %q", got)
 	}
+}
+
+// Reserved namespaces may only be registered by their owning identity: the
+// dashboard root and the management subtree belong to the gateway itself,
+// and the public-files tombstone belongs to the in-stack root service.
+func TestReservedPathsRequireOwningIdentity(t *testing.T) {
+	state, _ := lifecycleState(t)
+	management := NewManagementService(state)
+
+	for _, test := range []struct {
+		path  string
+		owner string
+	}{
+		{path: "/", owner: "uid-7"},
+		{path: "/v1/gateway", owner: "uid-7"},
+		{path: "/v1/gateway/port", owner: "uid-7"},
+		{path: "/v1/gateway/routes", owner: ServiceOwner},
+		{path: "/public-files", owner: "uid-7"},
+		{path: "/public-files/sub", owner: SelfRouteOwner},
+	} {
+		if err := management.CreateRoute(&model.Route{Path: test.path, Target: "http://127.0.0.1:8080"}, test.owner); !errors.Is(err, ErrRouteOwned) {
+			t.Fatalf("CreateRoute(%q, %q) error = %v, want ErrRouteOwned", test.path, test.owner, err)
+		}
+	}
+
+	// Near-miss spellings are ordinary paths.
+	assert.NilError(t, management.CreateRoute(&model.Route{Path: "/public-filess", Target: "http://127.0.0.1:8080"}, "uid-7"))
+	assert.NilError(t, management.DeleteRoute("/public-filess", "uid-7"))
+
+	assert.NilError(t, management.CreateRoute(&model.Route{Path: "/", Target: "http://127.0.0.1:8080"}, SelfRouteOwner))
+	assert.NilError(t, management.CreateRoute(&model.Route{Path: "/v1/gateway/port", Target: "http://127.0.0.1:8080"}, SelfRouteOwner))
+	assert.NilError(t, management.CreateRoute(&model.Route{Path: "/public-files", Target: "http://127.0.0.1:8080"}, ServiceOwner))
 }
