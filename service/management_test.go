@@ -78,10 +78,14 @@ func TestPathSorting(t *testing.T) {
 	}
 
 	for path, target := range routes {
+		owner := "tester"
+		if path == "/" {
+			owner = SelfRouteOwner
+		}
 		if err := management.CreateRoute(&model.Route{
 			Path:   path,
 			Target: target,
-		}, "tester"); err != nil {
+		}, owner); err != nil {
 			t.Fatal(err)
 		}
 	}

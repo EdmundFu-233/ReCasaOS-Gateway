@@ -33,6 +33,17 @@ const (
 	// Empty (the default) means same-origin only: no CORS headers are
 	// emitted and no preflight is answered.
 	ConfigKeyCORSOrigins = "gateway.CORSOrigins"
+	// ConfigKeyManagementBindAddress is the literal IP the management
+	// listener binds. It must stay loopback; the default keeps the
+	// management API off every network interface.
+	ConfigKeyManagementBindAddress = "gateway.ManagementBindAddress"
+	// ConfigKeyStaticBindAddress is the literal IP the static dashboard
+	// listener binds. It must stay loopback like the management listener.
+	ConfigKeyStaticBindAddress = "gateway.StaticBindAddress"
+	// ConfigKeyGatewayBindAddress is the literal IP the gateway data
+	// listener binds. Empty (the default) means all interfaces, which
+	// serves the dashboard on the LAN; set a private address to narrow it.
+	ConfigKeyGatewayBindAddress = "gateway.GatewayBindAddress"
 
 	GatewayName       = "gateway"
 	GatewayConfigType = "ini"
@@ -50,6 +61,9 @@ func LoadConfig() (*viper.Viper, error) {
 	config.SetDefault(ConfigKeyRouteTargetCIDRs, "127.0.0.1/32,::1/128")
 	config.SetDefault(ConfigKeyRouteLeaseTTL, "24h")
 	config.SetDefault(ConfigKeyCORSOrigins, "")
+	config.SetDefault(ConfigKeyManagementBindAddress, "127.0.0.1")
+	config.SetDefault(ConfigKeyStaticBindAddress, "127.0.0.1")
+	config.SetDefault(ConfigKeyGatewayBindAddress, "")
 
 	config.SetConfigName(GatewayName)
 	config.SetConfigType(GatewayConfigType)

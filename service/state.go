@@ -1,5 +1,9 @@
 package service
 
+import (
+	"github.com/IceWhaleTech/CasaOS-Gateway/common"
+)
+
 type State struct {
 	gatewayPort         string
 	onGatewayPortChange []func(string) error
@@ -19,13 +23,22 @@ func NewState() *State {
 	}
 }
 
-func (c *State) SetGatewayPort(port string) (err error) {
-	defer func() {
-		if err == nil {
-			c.gatewayPort = port
+func (c *State) SetGatewayPort(port string) error {
+	// An empty port means automatic selection at startup; any configured
+	// value must be a valid port number before it reaches the listener.
+	normalized := port
+	if port != "" {
+		var err error
+		normalized, err = common.ParsePort(port)
+		if err != nil {
+			return err
 		}
-	}()
-	return c.notifyOnGatewayPortChange(port)
+	}
+	if err := c.notifyOnGatewayPortChange(normalized); err != nil {
+		return err
+	}
+	c.gatewayPort = normalized
+	return nil
 }
 
 func (c *State) GetGatewayPort() string {

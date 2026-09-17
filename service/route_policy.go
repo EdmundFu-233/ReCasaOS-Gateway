@@ -136,6 +136,9 @@ func parseCIDRList(raw string) ([]*net.IPNet, error) {
 // ValidateRegistration checks one route registration and stamps its lease.
 // The caller supplies the authenticated owner; empty owners are rejected so
 // every live route has someone responsible for renewing or removing it.
+// Reserved namespaces may only be registered by their owning identity: the
+// dashboard root and the management subtree belong to the gateway itself,
+// and the public-files tombstone belongs to the in-stack root service.
 func (policy *RoutePolicy) ValidateRegistration(routePath, target, owner string) (RouteEntry, error) {
 	if policy == nil {
 		return RouteEntry{}, ErrInvalidRoute
@@ -149,6 +152,9 @@ func (policy *RoutePolicy) ValidateRegistration(routePath, target, owner string)
 	if err := ValidateRouteOwner(owner); err != nil {
 		return RouteEntry{}, err
 	}
+	if required, reserved := reservedRouteOwner(routePath); reserved && owner != required {
+		return RouteEntry{}, ErrRouteOwned
+	}
 	now := policy.now().Unix()
 	return RouteEntry{
 		Path:      routePath,
@@ -157,6 +163,21 @@ func (policy *RoutePolicy) ValidateRegistration(routePath, target, owner string)
 		ExpiresAt: now + int64(policy.leaseTTL/time.Second),
 		RenewedAt: now,
 	}, nil
+}
+
+// reservedRouteOwner reports the only identity that may register a reserved
+// namespace. The dashboard root and the management subtree are served by the
+// gateway itself; the public-files path is a 404 tombstone that only the
+// in-stack root service may claim, so no user JWT or component can shadow
+// them.
+func reservedRouteOwner(routePath string) (string, bool) {
+	if routePath == "/" || routePath == "/v1/gateway" || strings.HasPrefix(routePath, "/v1/gateway/") {
+		return SelfRouteOwner, true
+	}
+	if routePath == "/public-files" || strings.HasPrefix(routePath, "/public-files/") {
+		return ServiceOwner, true
+	}
+	return "", false
 }
 
 // ValidateRoutePath requires an absolute, clean, bounded path. Cleaning is
