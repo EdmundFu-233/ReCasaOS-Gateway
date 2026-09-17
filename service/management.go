@@ -77,7 +77,10 @@ func (g *Management) adopt(entry RouteEntry) {
 // CreateRoute registers or re-registers a path under the authenticated
 // owner. Re-registration by the same owner refreshes the lease (this is how
 // the gateway keeps its own routes alive); a different owner gets
-// ErrRouteOwned instead of a silent takeover.
+// ErrRouteOwned instead of a silent takeover. Only the in-stack service
+// identities may adopt a route imported from the pre-lease format, because
+// that owner can never renew or remove it and a user JWT must not be able to
+// displace a component route.
 func (g *Management) CreateRoute(route *model.Route, owner string) error {
 	entry, err := g.policy.ValidateRegistration(route.Path, route.Target, owner)
 	if err != nil {
@@ -87,7 +90,10 @@ func (g *Management) CreateRoute(route *model.Route, owner string) error {
 	defer g.mu.Unlock()
 	g.sweepLocked()
 	if existing, taken := g.entries[entry.Path]; taken && existing.Owner != owner {
-		return ErrRouteOwned
+		if existing.Owner != legacyRouteOwner || (owner != ServiceOwner && owner != SelfRouteOwner) {
+			return ErrRouteOwned
+		}
+		logger.Error("Adopting legacy-owned gateway route", zap.String("path", entry.Path), zap.String("owner", owner))
 	}
 	g.adopt(entry)
 	return g.persistLocked()
@@ -129,6 +135,18 @@ func (g *Management) DeleteRoute(routePath, owner string) error {
 	delete(g.entries, routePath)
 	delete(g.proxies, routePath)
 	return g.persistLocked()
+}
+
+// RouteOwner returns the owner of a live route, or an empty string when the
+// route is absent or expired.
+func (g *Management) RouteOwner(routePath string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sweepLocked()
+	if entry, ok := g.entries[routePath]; ok {
+		return entry.Owner
+	}
+	return ""
 }
 
 // GetRoutes lists live registrations as plain path/target pairs.
@@ -174,6 +192,13 @@ func (g *Management) sweepLocked() {
 	now := g.policy.now()
 	dropped := false
 	for registered, entry := range g.entries {
+		// In-stack service routes and the gateway's own routes are
+		// re-registered by their live owners at startup and are never
+		// persisted, so a lease cannot expire them and a dead owner cannot
+		// leave a stale entry across a restart.
+		if entry.Owner == ServiceOwner || entry.Owner == SelfRouteOwner {
+			continue
+		}
 		if entry.Expired(now) {
 			logger.Error("Dropping expired gateway route", zap.String("path", registered), zap.String("owner", entry.Owner))
 			delete(g.entries, registered)
@@ -192,6 +217,9 @@ func (g *Management) persistLocked() error {
 	routesFilePath := filepath.Join(g.State.GetRuntimePath(), RoutesFile)
 	entries := make([]RouteEntry, 0, len(g.entries))
 	for _, entry := range g.entries {
+		if entry.Owner == ServiceOwner || entry.Owner == SelfRouteOwner {
+			continue
+		}
 		entries = append(entries, *entry)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
@@ -217,6 +245,13 @@ func loadRouteEntries(routesFilepath string, policy *RoutePolicy) []RouteEntry {
 		for _, entry := range file.Routes {
 			if ValidateRoutePath(entry.Path) != nil || ValidateRouteOwner(entry.Owner) != nil {
 				logger.Error("Dropping malformed persisted route", zap.String("path", entry.Path))
+				continue
+			}
+			// Service and self routes are never persisted; if one appears in
+			// an older file it would be stale by definition, because the live
+			// owner re-registers it at startup.
+			if entry.Owner == ServiceOwner || entry.Owner == SelfRouteOwner {
+				logger.Error("Dropping non-persistent route owner", zap.String("path", entry.Path), zap.String("owner", entry.Owner))
 				continue
 			}
 			if policy.ValidateRouteTarget(entry.Target) != nil {
