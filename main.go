@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	_ "embed"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -526,37 +524,16 @@ func checkURL(url string) error {
 
 func writePidFile(runtimePath string) (string, error) {
 	filename := "gateway.pid"
-	filepath := filepath.Join(runtimePath, filename)
-	return filename, os.WriteFile(filepath, []byte(fmt.Sprintf("%d", os.Getpid())), 0o600)
+	destination := filepath.Join(runtimePath, filename)
+	if err := service.WriteFileAtomic0600(destination, []byte(fmt.Sprintf("%d", os.Getpid()))); err != nil {
+		return "", err
+	}
+	return filename, nil
 }
 
 func writeAddressFile(runtimePath string, filename string, address string) (string, error) {
-	err := os.MkdirAll(runtimePath, 0o755)
-	if err != nil {
-		return "", err
-	}
-
 	destination := filepath.Join(runtimePath, filename)
-	suffix := make([]byte, 8)
-	if _, err := rand.Read(suffix); err != nil {
-		return "", err
-	}
-	temporary := destination + ".tmp-" + hex.EncodeToString(suffix)
-	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "", err
-	}
-	if _, err := file.WriteString(address); err != nil {
-		_ = file.Close()
-		_ = os.Remove(temporary)
-		return "", err
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(temporary)
-		return "", err
-	}
-	if err := os.Rename(temporary, destination); err != nil {
-		_ = os.Remove(temporary)
+	if err := service.WriteFileAtomic0600(destination, []byte(address)); err != nil {
 		return "", err
 	}
 	return destination, nil
