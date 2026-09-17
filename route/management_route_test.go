@@ -13,6 +13,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/IceWhaleTech/CasaOS-Common/model"
+	"github.com/IceWhaleTech/CasaOS-Common/utils/jwt"
 	"github.com/IceWhaleTech/CasaOS-Gateway/service"
 	"gotest.tools/v3/assert"
 )
@@ -393,4 +394,89 @@ func TestServiceTokenIsNotAcceptedWithoutSetup(t *testing.T) {
 	// token: fail closed instead of authenticating everyone.
 	assert.Assert(t, !service.ServiceTokenMatches("", ""))
 	assert.Assert(t, !service.ServiceTokenMatches(_serviceToken, ""))
+}
+
+func TestServiceTokenRotationRejectsOldCredential(t *testing.T) {
+	defer setup(t)(t)
+
+	payload := `{"path":"/rotation","target":"http://127.0.0.1:8080/"}`
+
+	post := func(token string) int {
+		req, err := http.NewRequest(http.MethodPost, "/v1/gateway/routes", strings.NewReader(payload))
+		assert.NilError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		_router.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	assert.Equal(t, http.StatusCreated, post(_serviceToken))
+
+	rotated, err := service.GenerateServiceToken(_state.GetRuntimePath())
+	assert.NilError(t, err)
+	assert.NilError(t, _state.SetServiceToken(rotated))
+
+	assert.Equal(t, http.StatusUnauthorized, post(_serviceToken))
+	assert.Equal(t, http.StatusCreated, post(rotated))
+}
+
+func TestServiceTokenIsHeaderOnly(t *testing.T) {
+	defer setup(t)(t)
+
+	payload := `{"path":"/header-only","target":"http://127.0.0.1:8080/"}`
+	for _, target := range []string{
+		"/v1/gateway/routes?token=" + _serviceToken,
+	} {
+		req, err := http.NewRequest(http.MethodPost, target, strings.NewReader(payload))
+		assert.NilError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		_router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, "/v1/gateway/routes", strings.NewReader(payload))
+	assert.NilError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Cookie", "token="+_serviceToken)
+	w := httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestRefreshTokenIsNotAnOwnerCredential(t *testing.T) {
+	defer setup(t)(t)
+
+	refreshToken, err := jwt.GetRefreshToken("gateway-tester", authPrivateKey, 7)
+	assert.NilError(t, err)
+
+	payload := `{"path":"/refresh-owner","target":"http://127.0.0.1:8080/"}`
+	req, err := http.NewRequest(http.MethodPost, "/v1/gateway/routes", strings.NewReader(payload))
+	assert.NilError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+refreshToken)
+	w := httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestSpoofedOwnerHeaderDoesNotGrantServiceOwnership(t *testing.T) {
+	defer setup(t)(t)
+
+	payload := `{"path":"/spoofed-owner","target":"http://127.0.0.1:8080/"}`
+	req := bearerRequest(t, http.MethodPost, "/v1/gateway/routes", payload, true)
+	req.Header.Set(ownerHeader, service.ServiceOwner)
+	w := httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusCreated, w.Code)
+
+	// The route belongs to the JWT owner, not the spoofed service identity.
+	req, err := http.NewRequest(http.MethodPost, "/v1/gateway/routes", strings.NewReader(payload))
+	assert.NilError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+_serviceToken)
+	w = httptest.NewRecorder()
+	_router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusForbidden, w.Code)
 }

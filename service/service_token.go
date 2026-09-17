@@ -24,8 +24,9 @@ const ServiceTokenFilename = "gateway.token"
 const ServiceOwner = "service-recasaos-root"
 
 // GenerateServiceToken writes a fresh 256-bit credential to the runtime
-// directory and returns it. The destination is replaced atomically so a
-// concurrent reader never observes a partial token.
+// directory and returns it. The destination is replaced atomically, the
+// temporary file is created exclusively with owner-only permissions, and a
+// symlinked temporary path cannot be followed.
 func GenerateServiceToken(runtimePath string) (string, error) {
 	if strings.TrimSpace(runtimePath) == "" {
 		return "", fmt.Errorf("gateway service token runtime path is empty")
@@ -38,9 +39,28 @@ func GenerateServiceToken(runtimePath string) (string, error) {
 	if err := os.MkdirAll(runtimePath, 0o755); err != nil {
 		return "", err
 	}
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", fmt.Errorf("generate gateway service token name: %w", err)
+	}
 	destination := filepath.Join(runtimePath, ServiceTokenFilename)
-	temporary := destination + ".tmp"
-	if err := os.WriteFile(temporary, []byte(token+"\n"), 0o600); err != nil {
+	temporary := destination + ".tmp-" + hex.EncodeToString(suffix)
+	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if _, err := file.WriteString(token + "\n"); err != nil {
+		_ = file.Close()
+		_ = os.Remove(temporary)
+		return "", err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(temporary)
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(temporary)
 		return "", err
 	}
 	if err := os.Rename(temporary, destination); err != nil {

@@ -121,8 +121,8 @@ func TestLegacyImportIsBounded(t *testing.T) {
 }
 
 // Legacy-imported routes have no principal that can renew or delete them.
-// An authenticated owner must be able to adopt one instead of hitting a
-// permanent ownership conflict after an upgrade.
+// Only the in-stack service identities may adopt one; a user JWT owner must
+// not be able to displace a component route after an upgrade.
 func TestCreateRouteAdoptsLegacyOwnedRoute(t *testing.T) {
 	state, dir := lifecycleState(t)
 	legacy := `{"/keep": "http://127.0.0.1:8080"}`
@@ -131,12 +131,53 @@ func TestCreateRouteAdoptsLegacyOwnedRoute(t *testing.T) {
 	management := NewManagementService(state)
 	assert.Equal(t, legacyRouteOwner, management.entries["/keep"].Owner)
 
-	assert.NilError(t, management.CreateRoute(&model.Route{Path: "/keep", Target: "http://127.0.0.1:8081"}, "alice"))
-	assert.Equal(t, "alice", management.entries["/keep"].Owner)
+	assert.Error(t, management.CreateRoute(&model.Route{Path: "/keep", Target: "http://127.0.0.1:8081"}, "uid-7"), ErrRouteOwned.Error())
+	assert.Equal(t, legacyRouteOwner, management.entries["/keep"].Owner)
+
+	assert.NilError(t, management.CreateRoute(&model.Route{Path: "/keep", Target: "http://127.0.0.1:8081"}, ServiceOwner))
+	assert.Equal(t, ServiceOwner, management.entries["/keep"].Owner)
 	assert.Equal(t, "http://127.0.0.1:8081", management.entries["/keep"].Target)
 
-	// A second, different owner still cannot take over the adopted route.
-	assert.Error(t, management.CreateRoute(&model.Route{Path: "/keep", Target: "http://127.0.0.1:8082"}, "bob"), ErrRouteOwned.Error())
+	// A user owner still cannot take over the adopted route.
+	assert.Error(t, management.CreateRoute(&model.Route{Path: "/keep", Target: "http://127.0.0.1:8082"}, "uid-7"), ErrRouteOwned.Error())
+}
+
+// Service and self routes are re-registered by their live owners at startup,
+// so they are never persisted and never inherited across a restart.
+func TestServiceRoutesAreNotPersisted(t *testing.T) {
+	state, dir := lifecycleState(t)
+	management := NewManagementService(state)
+
+	assert.NilError(t, management.CreateRoute(&model.Route{Path: "/v1/file", Target: "http://127.0.0.1:8080"}, ServiceOwner))
+	assert.NilError(t, management.CreateRoute(&model.Route{Path: "/", Target: "http://127.0.0.1:8081"}, SelfRouteOwner))
+	assert.NilError(t, management.CreateRoute(&model.Route{Path: "/user", Target: "http://127.0.0.1:8082"}, "uid-7"))
+
+	content, err := os.ReadFile(filepath.Join(dir, RoutesFile))
+	assert.NilError(t, err)
+	assert.Assert(t, containsString(string(content), "/user"))
+	assert.Assert(t, !containsString(string(content), "/v1/file"))
+	assert.Assert(t, !containsString(string(content), `"/"`))
+
+	restarted := NewManagementService(state)
+	assert.Assert(t, restarted.GetProxy("/v1/file") == nil)
+	assert.Assert(t, restarted.GetProxy("/") == nil)
+	assert.Assert(t, restarted.GetProxy("/user") != nil)
+}
+
+// Service and self routes do not carry a lease: their owners re-register them
+// and a dead owner cannot leave a stale persisted entry.
+func TestServiceRoutesDoNotExpire(t *testing.T) {
+	state, _ := lifecycleState(t)
+	policy, err := NewRoutePolicy("127.0.0.1/32,::1/128", "127.0.0.1/32,::1/128", time.Minute)
+	assert.NilError(t, err)
+	management := NewManagementServiceWithPolicy(state, policy)
+
+	assert.NilError(t, management.CreateRoute(&model.Route{Path: "/v1/file", Target: "http://127.0.0.1:8080"}, ServiceOwner))
+	entry := management.entries["/v1/file"]
+	entry.ExpiresAt = time.Now().Add(-time.Hour).Unix()
+
+	assert.Assert(t, management.GetProxy("/v1/file") != nil)
+	assert.Equal(t, ServiceOwner, management.RouteOwner("/v1/file"))
 }
 
 func TestTargetValidation(t *testing.T) {

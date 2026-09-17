@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -196,10 +198,12 @@ func main() {
 		panic(err)
 	}
 
+	// The service token file is deliberately not removed on shutdown: a
+	// successor process may already have published its own token, and an old
+	// process must not delete the live credential.
 	defer cleanupFiles(
 		_state.GetRuntimePath(),
 		pidFilename, external.ManagementURLFilename, external.StaticURLFilename,
-		service.ServiceTokenFilename,
 	)
 
 	defer func() {
@@ -422,6 +426,9 @@ func keepSelfRoutesAlive(ctx context.Context, management *service.Management) {
 				return
 			case <-ticker.C:
 				for _, route := range management.GetRoutes() {
+					if management.RouteOwner(route.Path) != service.SelfRouteOwner {
+						continue
+					}
 					if err := management.RenewRoute(route.Path, service.SelfRouteOwner); err != nil {
 						logger.Error("Failed to renew gateway self route", zap.String("path", route.Path), zap.Any("error", err))
 					}
@@ -529,8 +536,30 @@ func writeAddressFile(runtimePath string, filename string, address string) (stri
 		return "", err
 	}
 
-	filepath := filepath.Join(runtimePath, filename)
-	return filepath, os.WriteFile(filepath, []byte(address), 0o600)
+	destination := filepath.Join(runtimePath, filename)
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", err
+	}
+	temporary := destination + ".tmp-" + hex.EncodeToString(suffix)
+	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if _, err := file.WriteString(address); err != nil {
+		_ = file.Close()
+		_ = os.Remove(temporary)
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(temporary)
+		return "", err
+	}
+	if err := os.Rename(temporary, destination); err != nil {
+		_ = os.Remove(temporary)
+		return "", err
+	}
+	return destination, nil
 }
 
 func cleanupFiles(runtimePath string, filenames ...string) {

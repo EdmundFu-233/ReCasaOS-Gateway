@@ -17,6 +17,11 @@ import (
 
 const ownerHeader = "X-Authenticated-User"
 
+// accessTokenIssuer is the only JWT issuer accepted for route management.
+// Refresh tokens are signed by the same user-service key but carry the
+// "refresh" issuer and must never act as an owner credential.
+const accessTokenIssuer = "casaos"
+
 // ManagementRoute serves the route registry. Every mutating and disclosing
 // endpoint requires a bearer access token or the local service credential:
 // loopback and query-string tokens are never accepted, so a local process
@@ -85,7 +90,7 @@ func (m *ManagementRoute) jwtMiddleware() echo.MiddlewareFunc {
 				return nil, nil
 			}
 			valid, claims, err := jwt.Validate(token, func() (*ecdsa.PublicKey, error) { return external.GetPublicKey(m.management.State.GetRuntimePath()) })
-			if err != nil || !valid {
+			if err != nil || !valid || claims == nil || claims.Issuer != accessTokenIssuer {
 				return nil, echo.ErrUnauthorized
 			}
 			c.Request().Header.Set(ownerHeader, "uid-"+strconv.Itoa(claims.ID))
