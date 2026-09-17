@@ -227,7 +227,7 @@ func (g *Management) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(routesFilePath, content, 0o600)
+	return WriteFileAtomic0600(routesFilePath, content)
 }
 
 func loadRouteEntries(routesFilepath string, policy *RoutePolicy) []RouteEntry {

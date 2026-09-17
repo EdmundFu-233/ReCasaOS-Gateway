@@ -51,3 +51,27 @@ func TestServiceTokenMatchesIsStrict(t *testing.T) {
 	assert.Assert(t, !ServiceTokenMatches(strings.Repeat("c", 64), token))
 	assert.Assert(t, !ServiceTokenMatches(token, strings.Repeat("c", 64)))
 }
+
+// Runtime control files published by the gateway must never follow a
+// symlink: the atomic temporary write happens under an exclusive name and
+// the final rename replaces, rather than traverses, the destination.
+func TestWriteFileAtomic0600ReplacesSymlinkNotTarget(t *testing.T) {
+	directory := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "victim")
+	assert.NilError(t, os.WriteFile(outside, []byte("victim"), 0o600))
+	link := filepath.Join(directory, "gateway.pid")
+	assert.NilError(t, os.Symlink(outside, link))
+
+	assert.NilError(t, WriteFileAtomic0600(link, []byte("12345")))
+	victim, err := os.ReadFile(outside)
+	assert.NilError(t, err)
+	assert.Equal(t, "victim", string(victim))
+
+	info, err := os.Lstat(link)
+	assert.NilError(t, err)
+	assert.Assert(t, info.Mode().IsRegular())
+	content, err := os.ReadFile(link)
+	assert.NilError(t, err)
+	assert.Equal(t, "12345", string(content))
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
