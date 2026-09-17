@@ -120,6 +120,25 @@ func TestLegacyImportIsBounded(t *testing.T) {
 	assert.Assert(t, remaining > 700*time.Hour && remaining <= legacyImportLease)
 }
 
+// Legacy-imported routes have no principal that can renew or delete them.
+// An authenticated owner must be able to adopt one instead of hitting a
+// permanent ownership conflict after an upgrade.
+func TestCreateRouteAdoptsLegacyOwnedRoute(t *testing.T) {
+	state, dir := lifecycleState(t)
+	legacy := `{"/keep": "http://127.0.0.1:8080"}`
+	assert.NilError(t, os.WriteFile(filepath.Join(dir, RoutesFile), []byte(legacy), 0o600))
+
+	management := NewManagementService(state)
+	assert.Equal(t, legacyRouteOwner, management.entries["/keep"].Owner)
+
+	assert.NilError(t, management.CreateRoute(&model.Route{Path: "/keep", Target: "http://127.0.0.1:8081"}, "alice"))
+	assert.Equal(t, "alice", management.entries["/keep"].Owner)
+	assert.Equal(t, "http://127.0.0.1:8081", management.entries["/keep"].Target)
+
+	// A second, different owner still cannot take over the adopted route.
+	assert.Error(t, management.CreateRoute(&model.Route{Path: "/keep", Target: "http://127.0.0.1:8082"}, "bob"), ErrRouteOwned.Error())
+}
+
 func TestTargetValidation(t *testing.T) {
 	state, _ := lifecycleState(t)
 	management := NewManagementService(state)

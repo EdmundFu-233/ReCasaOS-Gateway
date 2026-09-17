@@ -4,8 +4,9 @@ type State struct {
 	gatewayPort         string
 	onGatewayPortChange []func(string) error
 
-	runtimePath string
-	wwwPath     string
+	runtimePath  string
+	wwwPath      string
+	serviceToken string
 }
 
 func NewState() *State {
@@ -53,6 +54,18 @@ func (c *State) SetRuntimePath(path string) error {
 
 func (c *State) GetRuntimePath() string {
 	return c.runtimePath
+}
+
+// SetServiceToken records the active local service credential. The token is
+// regenerated on every process start and never persisted outside the runtime
+// directory.
+func (c *State) SetServiceToken(token string) error {
+	c.serviceToken = token
+	return nil
+}
+
+func (c *State) GetServiceToken() string {
+	return c.serviceToken
 }
 
 func (c *State) SetWWWPath(path string) error {

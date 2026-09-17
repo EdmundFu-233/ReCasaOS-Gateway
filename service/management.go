@@ -77,7 +77,9 @@ func (g *Management) adopt(entry RouteEntry) {
 // CreateRoute registers or re-registers a path under the authenticated
 // owner. Re-registration by the same owner refreshes the lease (this is how
 // the gateway keeps its own routes alive); a different owner gets
-// ErrRouteOwned instead of a silent takeover.
+// ErrRouteOwned instead of a silent takeover. Routes imported from the
+// pre-lease format have no principal that could ever renew them, so an
+// authenticated owner may adopt them once.
 func (g *Management) CreateRoute(route *model.Route, owner string) error {
 	entry, err := g.policy.ValidateRegistration(route.Path, route.Target, owner)
 	if err != nil {
@@ -87,7 +89,10 @@ func (g *Management) CreateRoute(route *model.Route, owner string) error {
 	defer g.mu.Unlock()
 	g.sweepLocked()
 	if existing, taken := g.entries[entry.Path]; taken && existing.Owner != owner {
-		return ErrRouteOwned
+		if existing.Owner != legacyRouteOwner {
+			return ErrRouteOwned
+		}
+		logger.Error("Adopting legacy-owned gateway route", zap.String("path", entry.Path), zap.String("owner", owner))
 	}
 	g.adopt(entry)
 	return g.persistLocked()

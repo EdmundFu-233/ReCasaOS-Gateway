@@ -18,9 +18,9 @@ import (
 const ownerHeader = "X-Authenticated-User"
 
 // ManagementRoute serves the route registry. Every mutating and disclosing
-// endpoint requires a bearer access token: loopback and query-string tokens
-// are never accepted, so a local process without credentials cannot rewire
-// the gateway.
+// endpoint requires a bearer access token or the local service credential:
+// loopback and query-string tokens are never accepted, so a local process
+// without credentials cannot rewire the gateway.
 type ManagementRoute struct {
 	management *service.Management
 	origins    []string
@@ -76,6 +76,14 @@ func (m *ManagementRoute) jwtMiddleware() echo.MiddlewareFunc {
 			return echo.ErrUnauthorized
 		},
 		ParseTokenFunc: func(token string, c echo.Context) (interface{}, error) {
+			// The local service credential authenticates in-stack component
+			// clients (the root service) that cannot present a user JWT. The
+			// token is generated per process start and readable only by the
+			// owning service UID.
+			if service.ServiceTokenMatches(token, m.management.State.GetServiceToken()) {
+				c.Request().Header.Set(ownerHeader, service.ServiceOwner)
+				return nil, nil
+			}
 			valid, claims, err := jwt.Validate(token, func() (*ecdsa.PublicKey, error) { return external.GetPublicKey(m.management.State.GetRuntimePath()) })
 			if err != nil || !valid {
 				return nil, echo.ErrUnauthorized

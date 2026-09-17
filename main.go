@@ -180,6 +180,16 @@ func parseCORSOrigins(raw string) ([]string, error) {
 }
 
 func main() {
+	serviceToken, err := service.GenerateServiceToken(_state.GetRuntimePath())
+	if err != nil {
+		logger.Error("Failed to generate gateway service token", zap.Any("error", err), zap.Any("runtimePath", _state.GetRuntimePath()))
+		panic(err)
+	}
+	if err := _state.SetServiceToken(serviceToken); err != nil {
+		logger.Error("Failed to record gateway service token", zap.Any("error", err))
+		panic(err)
+	}
+
 	pidFilename, err := writePidFile(_state.GetRuntimePath())
 	if err != nil {
 		logger.Error("Failed to write pid file to runtime path", zap.Any("error", err), zap.Any("runtimePath", _state.GetRuntimePath()))
@@ -189,6 +199,7 @@ func main() {
 	defer cleanupFiles(
 		_state.GetRuntimePath(),
 		pidFilename, external.ManagementURLFilename, external.StaticURLFilename,
+		service.ServiceTokenFilename,
 	)
 
 	defer func() {
